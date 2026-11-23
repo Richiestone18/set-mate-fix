@@ -14,6 +14,9 @@ curl -fsSL https://raw.githubusercontent.com/Richiestone18/set-mate-fix/main/set
 # 3. Solo poner el ícono (omitir el fix del reloj)
 curl -fsSL https://raw.githubusercontent.com/Richiestone18/set-mate-fix/main/set-mate-fix.sh | bash -s -- --icon-only
 
+# 3b. Solo el fix del reloj 12h (no toca mate-menu ni el ícono)
+curl -fsSL https://raw.githubusercontent.com/Richiestone18/set-mate-fix/main/set-mate-fix.sh | bash -s -- --clock-only
+
 # 4. Revertir todo al estado original del paquete
 curl -fsSL https://raw.githubusercontent.com/Richiestone18/set-mate-fix/main/set-mate-fix.sh | bash -s -- --revert
 
@@ -33,11 +36,29 @@ bash set-mate-fix.sh
 | Opción | Qué hace |
 |--------|----------|
 | (ninguna) | Aplica el ícono de Debian + fix del reloj 12h, reinicia el panel |
+| `--clock-only` | Solo el fix del reloj; no toca `mate-menu` ni el ícono |
 | `--icon-only` | Solo aplica el ícono, omite el reloj |
 | `--no-restart` | No reinicia `mate-panel` |
 | `--icon NOMBRE` | Fuerza un nombre de ícono concreto |
 | `--check` | Muestra qué parches están aplicados, sin cambiar nada |
 | `--revert` | Restaura todo al estado original del paquete |
+
+Códigos de salida: `0` todo bien · `2` opción inválida · `3` parcial (el parche del ícono no
+aplicó pero el reloj sí, o al revés) · `5` `mate-menu.py` quedó con sintaxis inválida ·
+`6` `--revert` no pudo restaurar el ícono.
+
+## El parche del ícono no es fatal (v2.6)
+
+En máquinas donde `/usr/lib/mate-menu/mate-menu.py` ya estaba editado a mano (o el paquete
+cambió y el bloque esperado ya no está), el parche del ícono **avisa y se salta**, pero el
+fix del reloj se aplica igual. Antes el script abortaba ahí y el reloj nunca se arreglaba.
+
+Para regularizar el archivo antes de reintentar:
+
+```bash
+apt-get download mate-menu && dpkg-deb -x mate-menu_*.deb /tmp/mm
+sudo cp /tmp/mm/usr/lib/mate-menu/mate-menu.py /usr/lib/mate-menu/mate-menu.py
+```
 
 ## Requisitos
 
@@ -55,11 +76,29 @@ bash set-mate-fix.sh
 4. (Opcional) Aplica el fix del reloj 12h (`09:04 p. m.` con cero a la izquierda).
 5. Reinicia `mate-panel` para que se vea el cambio.
 
+### El reloj 12h (por qué hacen falta tantos pasos)
+
+El locale `es_MX` de glibc trae `am_pm "";""`, así que `%p` se expande a **nada**: el panel
+mostraba `04:09` sin `a. m.`/`p. m.` aunque el formato ya fuera de 12 h. El script:
+
+1. Parchea `/usr/share/i18n/locales/es_MX` (`am_pm "a. m.";"p. m."`) y regenera el locale.
+2. Deja un wrapper en `/usr/libexec/mate-panel/clock-applet` que carga
+   `/usr/local/lib/fake_nl.so` vía `LD_PRELOAD` (fuerza `a. m.`/`p. m.` sin depender del locale)
+   y ejecuta el binario real, movido a `clock-applet.real`.
+3. Parchea el binario: `%l:%M %p` → `%I:%M %p` para el cero a la izquierda (`09:04`, no `9:04`).
+4. Guarda una copia prístina del binario en `/usr/local/lib/set-mate-fix/clock-applet.orig`
+   para que `--revert` deshaga también el parche del binario.
+5. Pone el reloj en `format='12-hour'`, sin fecha ni segundos.
+
 ## Revertir
 
 ```bash
 bash set-mate-fix.sh --revert
 ```
+
+`--revert` restaura el locale, el binario del reloj (desde la copia prístina), borra
+`fake_nl.so` y resetea las claves de dconf del reloj. Si el parche del ícono no se había
+aplicado, avisa y sale con código 6, pero el reloj sí se revierte.
 
 O desde el repo:
 

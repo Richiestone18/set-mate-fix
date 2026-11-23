@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 #
-# set-mate-fix.sh v2 — Corregir botón inicio (mate-menu) y reloj 12h del panel MATE.
+# set-mate-fix.sh v2.6 — Corregir botón inicio (mate-menu) y reloj 12h del panel MATE.
 #
 # Uso:
 #   bash set-mate-fix.sh                 aplicar fixes
 #   bash set-mate-fix.sh --check         ver estado
-#   bash set-mate-fix.sh --icon NOMBRE  fuerza icono (omite el SVG embebido)
+#   bash set-mate-fix.sh --icon NOMBRE   fuerza icono (omite el SVG embebido)
+#   bash set-mate-fix.sh --clock-only    SOLO el fix del reloj; no toca mate-menu
+#   bash set-mate-fix.sh --icon-only     SOLO el icono; omite el reloj
 #   bash set-mate-fix.sh --revert        revierte ambos fixes
 #   bash set-mate-fix.sh --no-restart    no reiniciar mate-panel
-#   bash set-mate-fix.sh --icon NOMBRE   forzar nombre del icono
 #
 # Integrado: set-mate-fix.sh también aplica el fix del reloj 12h (09:04 p. m. con cero a la izquierda)
+#
+# v2.6 (23-nov-2026):
+#   - --clock-only para aplicar solo el reloj.
+#   - El parche del icono YA NO aborta el script: si el bloque no está en
+#     mate-menu.py (archivo editado a mano o versión distinta a la esperada)
+#     avisa y CONTINÚA con el fix del reloj. Salida 3 = reloj aplicado, icono pendiente.
+#   - Reversión completa: al aplicar se guarda una copia prístina del binario en
+#     /usr/local/lib/set-mate-fix/clock-applet.orig y --revert la restaura, así que
+#     también deshace el parche binario %l -> %I (antes se quedaba aplicado).
 #
 set -euo pipefail
 
@@ -20,23 +30,25 @@ SCHEMA="${ROOT}/usr/share/glib-2.0/schemas/org.mate.mate-menu.gschema.xml"
 SCHEMA_DIR="${ROOT}/usr/share/glib-2.0/schemas"
 CLK_BIN="${ROOT}/usr/libexec/mate-panel/clock-applet"
 CLK_REAL="${ROOT}/usr/libexec/mate-panel/clock-applet.real"
+CLK_ORIG="${ROOT}/usr/local/lib/set-mate-fix/clock-applet.orig"
 LOCALE_ES="${ROOT}/usr/share/i18n/locales/es_MX"
 FULL_ICON="$HOME/.local/share/icons/Yaru/scalable/places/start-here-full-symbolic.svg"
 DEBIAN_ICON="$HOME/.local/share/icons/hicolor/scalable/places/distributor-logo-debian.svg"
 DEBIAN_SRC="/usr/share/desktop-base/debian-logos/logo.svg"
 BK=".set-mate-fix.orig"
 
-MODE="apply"; RESTART=1; FORCE_ICON=""; RUN_CLOCK=1
+MODE="apply"; RESTART=1; FORCE_ICON=""; RUN_CLOCK=1; RUN_ICON=1
 for arg in "$@"; do
   case "$arg" in
     --check)      MODE="check" ;;
     --revert)     MODE="revert" ;;
     --icon-only)  RUN_CLOCK=0 ;;
+    --clock-only) RUN_ICON=0 ;;
     --no-restart) RESTART=0 ;;
     --icon)       FORCE_ICON="__needs_value__" ;;
     --icon=*)     FORCE_ICON="${arg#*=}" ;;
     -h|--help)    awk 'NR<3{next} !/^#/{exit} {sub(/^# ?/,""); print}' "$0"; exit 0 ;;
-    *) echo "Opcion desconocida: $arg (--check --revert --icon-only --no-restart --icon NOMBRE)" >&2; exit 2 ;;
+    *) echo "Opcion desconocida: $arg (--check --revert --clock-only --icon-only --no-restart --icon NOMBRE)" >&2; exit 2 ;;
   esac
 done
 [[ "$FORCE_ICON" == "__needs_value__" ]] && { echo "Falta el valor para --icon" >&2; exit 2; }
@@ -695,6 +707,12 @@ apply_clock_wrapper() {
     [[ -f "$CLK_BIN" ]] || { echo "  AVISO: no existe $CLK_BIN; omito reloj"; return 1; }
     S mv "$CLK_BIN" "$CLK_REAL"
     echo "  binario movido a clock-applet.real"
+    # v2.6: copia pristina ANTES del parche %l -> %I, para que --revert lo deshaga del todo
+    if [[ ! -e "$CLK_ORIG" ]]; then
+      S mkdir -p "$(dirname "$CLK_ORIG")"
+      S install -m 0755 "$CLK_REAL" "$CLK_ORIG"
+      echo "  copia pristina: $CLK_ORIG"
+    fi
   fi
   local so="${ROOT}/usr/local/lib/fake_nl.so" w
   if [[ ! -f "$so" ]]; then
@@ -766,9 +784,15 @@ apply_clock() {
 
 revert_clock() {
   local did=0 prefix k
-  if [[ -f "$CLK_REAL" ]]; then
+  if [[ -f "$CLK_ORIG" ]]; then
+    # v2.6: restaura el binario SIN el parche %l -> %I
+    S install -m 0755 "$CLK_ORIG" "$CLK_BIN"
+    S rm -f "$CLK_REAL" "$CLK_ORIG"
+    S rmdir "$(dirname "$CLK_ORIG")" 2>/dev/null || true
+    echo "  clock-applet restaurado desde copia pristina (sin parche %I)"; did=1
+  elif [[ -f "$CLK_REAL" ]]; then
     S mv -f "$CLK_REAL" "$CLK_BIN"
-    echo "  clock-applet restaurado"; did=1
+    echo "  clock-applet restaurado (conserva el parche %l -> %I)"; did=1
   fi
   if [[ -f "${ROOT}/usr/local/lib/fake_nl.so" ]]; then
     S rm -f "${ROOT}/usr/local/lib/fake_nl.so"
@@ -797,6 +821,9 @@ clock_status() {
     echo "  wrapper: ACTIVO"
   else
     echo "  wrapper: no aplicado"
+  fi
+  if [[ -f "$CLK_ORIG" ]]; then
+    echo "  copia pristina: $CLK_ORIG"
   fi
   if [[ -f "${ROOT}/usr/local/lib/fake_nl.so" ]]; then
     echo "  fake_nl.so: instalado"
@@ -851,27 +878,39 @@ if [[ "$MODE" == "revert" ]]; then
   exit 0
 fi
 
-echo "-- aplicando parche del icono (mate-menu)"
-run_patcher apply || { echo "No se pudo parchear; nada que reiniciar." >&2; exit 4; }
+ICON_OK=1
+if [[ "$RUN_ICON" == "1" ]]; then
+  echo "-- aplicando parche del icono (mate-menu)"
+  if run_patcher apply; then
+    python3 -c "import ast; ast.parse(open('$PY_TARGET').read())" \
+      || { echo "ERROR: $PY_TARGET quedo con sintaxis invalida" >&2; exit 5; }
 
-python3 -c "import ast; ast.parse(open('$PY_TARGET').read())" \
-  || { echo "ERROR: $PY_TARGET quedo con sintaxis invalida" >&2; exit 5; }
+    if [[ -n "$ROOT" ]]; then
+      echo "(prueba con MATE_FIX_ROOT=$ROOT: no se tocan schemas, gsettings ni reloj)"
+      exit 0
+    fi
 
-if [[ -n "$ROOT" ]]; then
-  echo "(prueba con MATE_FIX_ROOT=$ROOT: no se tocan schemas, gsettings ni reloj)"
-  exit 0
-fi
+    S glib-compile-schemas "$SCHEMA_DIR"
+    S rm -f /usr/lib/mate-menu/__pycache__/mate-menu.*.pyc 2>/dev/null || true
 
-S glib-compile-schemas "$SCHEMA_DIR"
-S rm -f /usr/lib/mate-menu/__pycache__/mate-menu.*.pyc 2>/dev/null || true
-
-ICON="${FORCE_ICON:-$(pick_icon)}"
-gsettings set org.mate.mate-menu custom-icon "$ICON"
-echo "  custom-icon  = $ICON"
-echo "  tema iconos  = $(gsettings get org.mate.interface icon-theme | tr -d "'")"
-if [[ -z "$FORCE_ICON" ]]; then
-  install_full_icon
-  install_debian_icon || true
+    ICON="${FORCE_ICON:-$(pick_icon)}"
+    gsettings set org.mate.mate-menu custom-icon "$ICON"
+    echo "  custom-icon  = $ICON"
+    echo "  tema iconos  = $(gsettings get org.mate.interface icon-theme | tr -d "'")"
+    if [[ -z "$FORCE_ICON" ]]; then
+      install_full_icon
+      install_debian_icon || true
+    fi
+  else
+    # v2.6: el icono NO es fatal; el fix del reloj se aplica igual
+    ICON_OK=0
+    echo "  AVISO: no se pudo parchear mate-menu.py (editado a mano o version distinta a la esperada)." >&2
+    echo "         Se CONTINUA con el fix del reloj; el boton del menu queda como esta." >&2
+    echo "         Para regularizarlo: apt-get download mate-menu && dpkg-deb -x mate-menu_*.deb /tmp/mm" >&2
+    echo "         y restaura /usr/lib/mate-menu/mate-menu.py del paquete, luego repite." >&2
+  fi
+else
+  echo "-- icono: omitido (--clock-only)"
 fi
 
 CLOCK_OK=1
@@ -883,8 +922,17 @@ fi
 [[ "$RESTART" == 1 ]] && restart_panel
 
 echo "-- verificacion"
-python3 "$PATCHER" check "$ROOT"
-echo "  custom-icon = $(gsettings get org.mate.mate-menu custom-icon)"
+if [[ "$RUN_ICON" == "1" ]]; then
+  python3 "$PATCHER" check "$ROOT"
+  echo "  custom-icon = $(gsettings get org.mate.mate-menu custom-icon 2>/dev/null || echo '(clave no disponible)')"
+else
+  echo "  icono: no tocado en esta corrida (--clock-only)"
+fi
 clock_status
 echo
+if [[ "$ICON_OK" == "0" || "$CLOCK_OK" == "0" ]]; then
+  echo "Resumen: icono=$([[ "$ICON_OK" == 1 ]] && echo OK || echo PENDIENTE), reloj=$([[ "$CLOCK_OK" == 1 ]] && echo OK || echo PENDIENTE) — salida 3."
+  echo "Revisa los AVISO de arriba (solo se revierte con --revert lo que si se aplico)."
+  exit 3
+fi
 echo "Si el boton sigue sin verse o algo se ve mal:  bash set-mate-fix.sh --revert"
